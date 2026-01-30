@@ -4,21 +4,69 @@ A production-grade E-Commerce REST API built with Spring Boot, featuring JWT aut
 
 ## 🚀 Quick Start
 
-### Prerequisites
-- Java 21
-- Maven 3.8+
+### Option 1: Docker (Recommended)
 
-### Run the Application
+**Prerequisites**: Docker & Docker Compose
+
+```bash
+# Start everything with one command
+docker compose up --build -d
+
+# View logs
+docker compose logs -f app
+
+# Stop and cleanup
+docker compose down -v
+```
+
+**Access Points:**
+- **API**: http://localhost:8080/api/products
+- **Swagger UI**: http://localhost:8080/swagger-ui.html
+- **API Docs**: http://localhost:8080/api-docs
+
+### Option 2: Local Development
+
+**Prerequisites**: Java 21, Maven 3.8+
+
 ```bash
 mvn spring-boot:run
 ```
 
-The application will start at `http://localhost:8080`
-
-### Access Points
+**Access Points:**
 - **Swagger UI**: http://localhost:8080/swagger-ui.html
-- **API Docs**: http://localhost:8080/api-docs
 - **H2 Console**: http://localhost:8080/h2-console (JDBC URL: `jdbc:h2:mem:ecommercedb`)
+
+## 🐳 Docker Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Docker Network                        │
+│  ┌─────────────────┐        ┌─────────────────────────┐ │
+│  │   PostgreSQL    │◄──────►│    Spring Boot App      │ │
+│  │   Port: 5432    │  JDBC  │    Port: 8080           │ │
+│  └────────┬────────┘        └───────────┬─────────────┘ │
+│     postgres_data                 uploads_data          │
+│      (volume)                      (volume)             │
+└─────────────────────────────────────────────────────────┘
+                                          ↓
+                                    localhost:8080
+```
+
+**Docker Files:**
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Multi-stage build (Maven + JDK 21) |
+| `docker-compose.yml` | PostgreSQL + App orchestration |
+| `.dockerignore` | Excludes build artifacts |
+| `application-docker.yaml` | Docker-specific Spring profile |
+
+**Environment Variables:**
+```bash
+SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/ecommerce
+SPRING_DATASOURCE_USERNAME=ecommerce
+SPRING_DATASOURCE_PASSWORD=ecommerce_pass
+JWT_SECRET=your-secret-key
+```
 
 ## 🔐 Default Credentials
 
@@ -49,6 +97,7 @@ The application will start at `http://localhost:8080`
 - ✅ Global Exception Handling
 - ✅ Input Validation
 - ✅ Swagger Documentation
+- ✅ Docker Support with PostgreSQL
 
 ## 🏗️ Architecture
 
@@ -138,12 +187,13 @@ src/main/java/com/ashu/E_Commerece/
 | Component | Technology |
 |-----------|------------|
 | Framework | Spring Boot 3.2 |
-| Database | H2 (In-Memory) |
+| Language | Java 21 |
+| Database | PostgreSQL (Docker) / H2 (Local) |
 | Security | Spring Security + JWT |
 | Caching | Caffeine |
 | Rate Limiting | Bucket4j |
 | Documentation | SpringDoc OpenAPI |
-| Validation | Jakarta Validation |
+| Containerization | Docker + Docker Compose |
 | Build Tool | Maven |
 
 ## 📝 Mock Services
@@ -168,3 +218,34 @@ On startup, the application creates:
 - 2 Users (1 Admin, 1 Regular)
 - 6 Categories (with hierarchy)
 - 13 Products (with various categories)
+
+## 🛠️ Development
+
+### Running Tests
+```bash
+mvn test
+```
+
+### Building for Production
+```bash
+mvn clean package -DskipTests
+java -jar target/*.jar
+```
+
+### Docker Commands
+```bash
+# Build and start
+docker compose up --build -d
+
+# View logs
+docker compose logs -f
+
+# Stop containers
+docker compose down
+
+# Remove volumes (delete data)
+docker compose down -v
+
+# Rebuild after code changes
+docker compose up --build -d
+```
