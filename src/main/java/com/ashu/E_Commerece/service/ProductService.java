@@ -29,7 +29,8 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * Service for product operations.
+ * Product catalog management with caching and dynamic search.
+ * Uses JPA Specifications for flexible filtering without N+1 queries.
  */
 @Service
 @RequiredArgsConstructor
@@ -44,38 +45,37 @@ public class ProductService {
      */
     @Transactional(readOnly = true)
     public PagedResponse<ProductResponse> getAllProducts(int page, int size, String sortBy, String sortDir) {
-        Sort sort = sortDir.equalsIgnoreCase("desc") 
-            ? Sort.by(sortBy).descending() 
-            : Sort.by(sortBy).ascending();
-        
+        Sort sort = sortDir.equalsIgnoreCase("desc")
+                ? Sort.by(sortBy).descending()
+                : Sort.by(sortBy).ascending();
+
         Pageable pageable = PageRequest.of(page, size, sort);
         Page<Product> products = productRepository.findByActiveTrue(pageable);
-        
+
         return mapToPagedResponse(products);
     }
 
     /**
-     * Search products with filters.
+     * Dynamic search using JPA Specification API. Builds query predicates
+     * at runtime based on provided criteria for flexible filtering.
      */
     @Transactional(readOnly = true)
-    public PagedResponse<ProductResponse> searchProducts(ProductSearchCriteria criteria, 
-                                                          int page, int size, 
-                                                          String sortBy, String sortDir) {
+    public PagedResponse<ProductResponse> searchProducts(ProductSearchCriteria criteria,
+            int page, int size,
+            String sortBy, String sortDir) {
         Specification<Product> spec = buildSpecification(criteria);
-        
-        Sort sort = sortDir.equalsIgnoreCase("desc") 
-            ? Sort.by(sortBy).descending() 
-            : Sort.by(sortBy).ascending();
-        
+
+        Sort sort = sortDir.equalsIgnoreCase("desc")
+                ? Sort.by(sortBy).descending()
+                : Sort.by(sortBy).ascending();
+
         Pageable pageable = PageRequest.of(page, size, sort);
         Page<Product> products = productRepository.findAll(spec, pageable);
-        
+
         return mapToPagedResponse(products);
     }
 
-    /**
-     * Get product by ID.
-     */
+    // Cached to reduce DB load for product detail pages
     @Transactional(readOnly = true)
     @Cacheable(value = "products", key = "#id")
     public ProductResponse getProductById(Long id) {
@@ -83,9 +83,6 @@ public class ProductService {
         return mapToResponse(product);
     }
 
-    /**
-     * Get products by category.
-     */
     @Transactional(readOnly = true)
     public PagedResponse<ProductResponse> getProductsByCategory(Long categoryId, int page, int size) {
         Pageable pageable = PageRequest.of(page, size);
@@ -93,9 +90,7 @@ public class ProductService {
         return mapToPagedResponse(products);
     }
 
-    /**
-     * Get featured products.
-     */
+    // Cached home page featured products - invalidated on any product change
     @Transactional(readOnly = true)
     @Cacheable(value = "products", key = "'featured'")
     public List<ProductResponse> getFeaturedProducts() {
@@ -106,9 +101,6 @@ public class ProductService {
                 .collect(Collectors.toList());
     }
 
-    /**
-     * Get top rated products.
-     */
     @Transactional(readOnly = true)
     public List<ProductResponse> getTopRatedProducts() {
         return productRepository.findTop10ByActiveTrueOrderByAverageRatingDesc()
@@ -117,9 +109,6 @@ public class ProductService {
                 .collect(Collectors.toList());
     }
 
-    /**
-     * Get newest products.
-     */
     @Transactional(readOnly = true)
     public List<ProductResponse> getNewestProducts() {
         return productRepository.findTop10ByActiveTrueOrderByCreatedAtDesc()
@@ -128,9 +117,7 @@ public class ProductService {
                 .collect(Collectors.toList());
     }
 
-    /**
-     * Create a new product.
-     */
+    // CacheEvict clears all entries since new products affect list queries
     @Transactional
     @CacheEvict(value = "products", allEntries = true)
     public ProductResponse createProduct(ProductRequest request) {
@@ -163,17 +150,14 @@ public class ProductService {
         return mapToResponse(product);
     }
 
-    /**
-     * Update a product.
-     */
     @Transactional
     @CacheEvict(value = "products", allEntries = true)
     public ProductResponse updateProduct(Long id, ProductRequest request) {
         Product product = findProductById(id);
 
-        // Check SKU uniqueness
-        if (request.getSku() != null && !request.getSku().equals(product.getSku()) 
-            && productRepository.existsBySku(request.getSku())) {
+        // SKU uniqueness check excludes current product
+        if (request.getSku() != null && !request.getSku().equals(product.getSku())
+                && productRepository.existsBySku(request.getSku())) {
             throw new BadRequestException("Product with this SKU already exists");
         }
 
@@ -184,7 +168,7 @@ public class ProductService {
         product.setStockQuantity(request.getStockQuantity());
         product.setSku(request.getSku());
         product.setBrand(request.getBrand());
-        
+
         if (request.getImageUrls() != null) {
             product.setImageUrls(request.getImageUrls());
         }
@@ -207,9 +191,7 @@ public class ProductService {
         return mapToResponse(product);
     }
 
-    /**
-     * Delete a product (soft delete by setting inactive).
-     */
+    // Soft delete preserves order history referential integrity
     @Transactional
     @CacheEvict(value = "products", allEntries = true)
     public void deleteProduct(Long id) {
@@ -219,9 +201,6 @@ public class ProductService {
         log.info("Product deactivated: {}", product.getName());
     }
 
-    /**
-     * Update product stock.
-     */
     @Transactional
     public void updateStock(Long productId, int quantity) {
         Product product = findProductById(productId);
@@ -233,9 +212,7 @@ public class ProductService {
         productRepository.save(product);
     }
 
-    /**
-     * Update product rating.
-     */
+    // Called by ReviewService when reviews change - updates denormalized rating
     @Transactional
     public void updateProductRating(Long productId, BigDecimal averageRating, int reviewCount) {
         Product product = findProductById(productId);
@@ -252,45 +229,45 @@ public class ProductService {
     private Specification<Product> buildSpecification(ProductSearchCriteria criteria) {
         return (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
-            
-            // Always filter for active products
+
+            // Base filter: only active products shown to customers
             predicates.add(cb.isTrue(root.get("active")));
-            
+
             if (criteria.getKeyword() != null && !criteria.getKeyword().isEmpty()) {
                 String keyword = "%" + criteria.getKeyword().toLowerCase() + "%";
                 Predicate namePredicate = cb.like(cb.lower(root.get("name")), keyword);
                 Predicate descPredicate = cb.like(cb.lower(root.get("description")), keyword);
                 predicates.add(cb.or(namePredicate, descPredicate));
             }
-            
+
             if (criteria.getCategoryId() != null) {
                 predicates.add(cb.equal(root.get("category").get("id"), criteria.getCategoryId()));
             }
-            
+
             if (criteria.getMinPrice() != null) {
                 predicates.add(cb.greaterThanOrEqualTo(root.get("price"), criteria.getMinPrice()));
             }
-            
+
             if (criteria.getMaxPrice() != null) {
                 predicates.add(cb.lessThanOrEqualTo(root.get("price"), criteria.getMaxPrice()));
             }
-            
+
             if (criteria.getBrand() != null && !criteria.getBrand().isEmpty()) {
                 predicates.add(cb.equal(cb.lower(root.get("brand")), criteria.getBrand().toLowerCase()));
             }
-            
+
             if (criteria.getInStock() != null && criteria.getInStock()) {
                 predicates.add(cb.greaterThan(root.get("stockQuantity"), 0));
             }
-            
+
             if (criteria.getFeatured() != null && criteria.getFeatured()) {
                 predicates.add(cb.isTrue(root.get("featured")));
             }
-            
+
             if (criteria.getMinRating() != null) {
                 predicates.add(cb.greaterThanOrEqualTo(root.get("averageRating"), criteria.getMinRating()));
             }
-            
+
             return cb.and(predicates.toArray(new Predicate[0]));
         };
     }

@@ -25,7 +25,9 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * Service for order operations.
+ * Handles order lifecycle: creation, status transitions, and cancellations.
+ * All operations are transactional to maintain data consistency between
+ * orders, inventory, and cart state.
  */
 @Service
 @RequiredArgsConstructor
@@ -39,7 +41,11 @@ public class OrderService {
     private final EmailService emailService;
 
     /**
-     * Create order from cart.
+     * Creates an order atomically from the user's cart. This operation:
+     * 1. Validates stock availability before reserving inventory
+     * 2. Decrements product stock to prevent overselling
+     * 3. Clears cart only after successful order creation
+     * Rollback occurs if any step fails, restoring original state.
      */
     @Transactional
     public OrderResponse createOrder(OrderRequest request) {
@@ -50,7 +56,7 @@ public class OrderService {
             throw new BadRequestException("Cart is empty");
         }
 
-        // Validate stock availability
+        // Fail-fast: Check all items before modifying any inventory
         for (CartItem cartItem : cart.getItems()) {
             Product product = cartItem.getProduct();
             if (cartItem.getQuantity() > product.getStockQuantity()) {
@@ -58,20 +64,21 @@ public class OrderService {
             }
         }
 
-        // Create order
+        // Billing defaults to shipping if not provided (common e-commerce pattern)
         Order order = Order.builder()
                 .user(user)
                 .shippingAddress(request.getShippingAddress())
-                .billingAddress(request.getBillingAddress() != null ? request.getBillingAddress() : request.getShippingAddress())
+                .billingAddress(request.getBillingAddress() != null ? request.getBillingAddress()
+                        : request.getShippingAddress())
                 .paymentMethod(request.getPaymentMethod())
                 .notes(request.getNotes())
                 .status(OrderStatus.PENDING)
                 .build();
 
-        // Create order items and update stock
+        // Snapshot product details at order time to preserve historical accuracy
         for (CartItem cartItem : cart.getItems()) {
             Product product = cartItem.getProduct();
-            
+
             OrderItem orderItem = OrderItem.builder()
                     .product(product)
                     .productName(product.getName())
@@ -79,36 +86,33 @@ public class OrderService {
                     .quantity(cartItem.getQuantity())
                     .unitPrice(product.getEffectivePrice())
                     .build();
-            
+
             order.addItem(orderItem);
 
-            // Update stock
+            // Decrement stock immediately to prevent concurrent overselling
             product.setStockQuantity(product.getStockQuantity() - cartItem.getQuantity());
             productRepository.save(product);
         }
 
-        // Calculate totals
+        // Order calculates its own totals to ensure consistency with business rules
         order.calculateSubtotal();
         order.setShippingCost(calculateShippingCost(order.getSubtotal()));
         order.setTax(calculateTax(order.getSubtotal()));
         order.calculateTotalAmount();
 
         order = orderRepository.save(order);
-        
-        // Clear cart
+
+        // Cart cleared only after successful order persistence
         cartService.clearCart();
-        
+
         log.info("Order created: {} for user: {}", order.getOrderNumber(), user.getEmail());
 
-        // Send confirmation email (mock)
+        // Fire-and-forget: email failure should not roll back the order
         emailService.sendOrderConfirmation(user.getEmail(), order);
 
         return mapToResponse(order);
     }
 
-    /**
-     * Get user's orders.
-     */
     @Transactional(readOnly = true)
     public PagedResponse<OrderResponse> getUserOrders(int page, int size) {
         User user = userService.getCurrentUser();
@@ -117,25 +121,23 @@ public class OrderService {
         return mapToPagedResponse(orders);
     }
 
-    /**
-     * Get all orders (admin).
-     */
     @Transactional(readOnly = true)
     public PagedResponse<OrderResponse> getAllOrders(int page, int size, OrderStatus status) {
         Pageable pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
         Page<Order> orders;
-        
+
         if (status != null) {
             orders = orderRepository.findByStatus(status, pageable);
         } else {
             orders = orderRepository.findAll(pageable);
         }
-        
+
         return mapToPagedResponse(orders);
     }
 
     /**
-     * Get order by ID.
+     * Returns order if user owns it or is admin. Non-owners receive 404
+     * (not 403) to avoid leaking order existence information.
      */
     @Transactional(readOnly = true)
     public OrderResponse getOrderById(Long id) {
@@ -143,7 +145,7 @@ public class OrderService {
         Order order = orderRepository.findByIdWithItems(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Order", "id", id));
 
-        // Users can only view their own orders (unless admin)
+        // Security: return 404 instead of 403 to hide order existence from non-owners
         if (user.getRole() != Role.ADMIN && !order.getUser().getId().equals(user.getId())) {
             throw new ResourceNotFoundException("Order", "id", id);
         }
@@ -151,9 +153,6 @@ public class OrderService {
         return mapToResponse(order);
     }
 
-    /**
-     * Get order by order number.
-     */
     @Transactional(readOnly = true)
     public OrderResponse getOrderByNumber(String orderNumber) {
         Order order = orderRepository.findByOrderNumber(orderNumber)
@@ -162,7 +161,8 @@ public class OrderService {
     }
 
     /**
-     * Update order status (admin).
+     * Transitions order status and records timestamps for tracking.
+     * Notes are appended (not replaced) to preserve audit trail.
      */
     @Transactional
     public OrderResponse updateOrderStatus(Long id, OrderStatusUpdateRequest request) {
@@ -177,7 +177,7 @@ public class OrderService {
             order.setNotes(existingNotes + request.getNotes());
         }
 
-        // Update timestamps based on status
+        // Record milestone timestamps for shipment tracking
         if (request.getStatus() == OrderStatus.SHIPPED) {
             order.setShippedAt(LocalDateTime.now());
         } else if (request.getStatus() == OrderStatus.DELIVERED) {
@@ -187,14 +187,14 @@ public class OrderService {
         order = orderRepository.save(order);
         log.info("Order {} status updated from {} to {}", order.getOrderNumber(), oldStatus, request.getStatus());
 
-        // Send status update email (mock)
         emailService.sendOrderStatusUpdate(order.getUser().getEmail(), order);
 
         return mapToResponse(order);
     }
 
     /**
-     * Cancel order.
+     * Cancels order and restores inventory. Only allowed for PENDING/CONFIRMED
+     * orders to prevent cancellation of shipped items.
      */
     @Transactional
     public OrderResponse cancelOrder(Long id) {
@@ -202,17 +202,17 @@ public class OrderService {
         Order order = orderRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Order", "id", id));
 
-        // Users can only cancel their own orders
+        // Same security pattern as getOrderById
         if (user.getRole() != Role.ADMIN && !order.getUser().getId().equals(user.getId())) {
             throw new ResourceNotFoundException("Order", "id", id);
         }
 
-        // Can only cancel pending or confirmed orders
+        // Business rule: shipped/delivered orders cannot be cancelled via API
         if (order.getStatus() != OrderStatus.PENDING && order.getStatus() != OrderStatus.CONFIRMED) {
             throw new BadRequestException("Cannot cancel order in current status: " + order.getStatus());
         }
 
-        // Restore stock
+        // Restore inventory to make items available for other customers
         for (OrderItem item : order.getItems()) {
             Product product = item.getProduct();
             product.setStockQuantity(product.getStockQuantity() + item.getQuantity());
@@ -221,15 +221,12 @@ public class OrderService {
 
         order.setStatus(OrderStatus.CANCELLED);
         order = orderRepository.save(order);
-        
+
         log.info("Order {} cancelled", order.getOrderNumber());
 
         return mapToResponse(order);
     }
 
-    /**
-     * Get recent orders (admin).
-     */
     @Transactional(readOnly = true)
     public List<OrderResponse> getRecentOrders() {
         return orderRepository.findTop10ByOrderByCreatedAtDesc().stream()
@@ -238,7 +235,7 @@ public class OrderService {
     }
 
     private BigDecimal calculateShippingCost(BigDecimal subtotal) {
-        // Free shipping over $100
+        // Business rule: free shipping threshold
         if (subtotal.compareTo(new BigDecimal("100")) >= 0) {
             return BigDecimal.ZERO;
         }
@@ -246,7 +243,7 @@ public class OrderService {
     }
 
     private BigDecimal calculateTax(BigDecimal subtotal) {
-        // 10% tax rate
+        // Simplified tax calculation - production would use tax service
         return subtotal.multiply(new BigDecimal("0.10")).setScale(2, java.math.RoundingMode.HALF_UP);
     }
 

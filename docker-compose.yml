@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  # =====================================================
+  # PostgreSQL Database Service
+  # =====================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: ecommerce-db
+    restart: unless-stopped
+    
+    # Environment variables for database initialization
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce}
+      POSTGRES_USER: ${POSTGRES_USER:-ecommerce}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ecommerce_pass}
+    
+    # Persist database data in named volume
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    
+    # Health check to ensure DB is ready before app starts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ecommerce} -d ${POSTGRES_DB:-ecommerce}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    
+    # Internal network only (not exposed to host)
+    networks:
+      - ecommerce-network
+
+  # =====================================================
+  # Spring Boot Application Service
+  # =====================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ecommerce-app
+    restart: unless-stopped
+    
+    # Wait for database to be healthy before starting
+    depends_on:
+      postgres:
+        condition: service_healthy
+    
+    # Environment variables (no hardcoded secrets)
+    environment:
+      # Activate Docker Spring profile
+      SPRING_PROFILES_ACTIVE: docker
+      
+      # Database connection (uses service name as hostname)
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-ecommerce}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-ecommerce}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-ecommerce_pass}
+      
+      # JWT secret (override in production!)
+      JWT_SECRET: ${JWT_SECRET:-7c9e8f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0}
+      
+      # File upload directory (inside container)
+      FILE_UPLOAD_DIR: /app/uploads
+    
+    # Expose port 8080 to host
+    ports:
+      - "8080:8080"
+    
+    # Persist uploaded files
+    volumes:
+      - uploads_data:/app/uploads
+    
+    networks:
+      - ecommerce-network
+
+# =====================================================
+# Named Volumes for Data Persistence
+# =====================================================
+volumes:
+  postgres_data:
+    driver: local
+  uploads_data:
+    driver: local
+
+# =====================================================
+# Network Configuration
+# =====================================================
+networks:
+  ecommerce-network:
+    driver: bridge

@@ -13,7 +13,11 @@ import javax.crypto.SecretKey;
 import java.util.Date;
 
 /**
- * Utility class for JWT token operations.
+ * Handles JWT token lifecycle: generation, parsing, and validation.
+ * Uses HMAC-SHA for symmetric signing - secret must be 256+ bits and kept
+ * secure.
+ * Access tokens are short-lived (24h), refresh tokens longer (7d) for security
+ * balance.
  */
 @Component
 @Slf4j
@@ -28,17 +32,13 @@ public class JwtUtil {
     @Value("${jwt.refresh-expiration}")
     private long refreshExpiration;
 
-    /**
-     * Generate JWT token for authenticated user.
-     */
     public String generateToken(Authentication authentication) {
         UserDetails userDetails = (UserDetails) authentication.getPrincipal();
         return generateToken(userDetails.getUsername());
     }
 
-    /**
-     * Generate JWT token for username.
-     */
+    // Subject contains email (unique identifier) - avoid storing sensitive data in
+    // claims
     public String generateToken(String username) {
         Date now = new Date();
         Date expiryDate = new Date(now.getTime() + jwtExpiration);
@@ -51,9 +51,7 @@ public class JwtUtil {
                 .compact();
     }
 
-    /**
-     * Generate refresh token.
-     */
+    // Refresh tokens use same signing but longer expiry for token rotation flow
     public String generateRefreshToken(String username) {
         Date now = new Date();
         Date expiryDate = new Date(now.getTime() + refreshExpiration);
@@ -66,21 +64,19 @@ public class JwtUtil {
                 .compact();
     }
 
-    /**
-     * Get username from JWT token.
-     */
     public String getUsernameFromToken(String token) {
         Claims claims = Jwts.parser()
                 .verifyWith(getSigningKey())
                 .build()
                 .parseSignedClaims(token)
                 .getPayload();
-        
+
         return claims.getSubject();
     }
 
     /**
-     * Validate JWT token.
+     * Validates token signature and expiration. Returns false (not exception)
+     * for invalid tokens to allow graceful handling in filter chain.
      */
     public boolean validateToken(String token) {
         try {
@@ -101,13 +97,11 @@ public class JwtUtil {
         return false;
     }
 
-    /**
-     * Get expiration time in seconds.
-     */
     public long getExpirationInSeconds() {
         return jwtExpiration / 1000;
     }
 
+    // Decodes Base64 secret and creates HMAC-SHA signing key
     private SecretKey getSigningKey() {
         byte[] keyBytes = Decoders.BASE64.decode(jwtSecret);
         return Keys.hmacShaKeyFor(keyBytes);

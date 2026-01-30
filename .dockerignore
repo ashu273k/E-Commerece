@@ -1,0 +1,53 @@
+# =====================================================
+# Docker Ignore File
+# Excludes unnecessary files from Docker build context
+# =====================================================
+
+# Build outputs
+target/
+*.jar
+*.war
+*.class
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Docker files (avoid recursive copy)
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Logs
+*.log
+logs/
+
+# Test files
+src/test/
+
+# Uploads (runtime data)
+uploads/
+
+# Maven wrapper (will be in image)
+.mvn/wrapper/maven-wrapper.jar
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files with secrets
+.env
+*.env.local

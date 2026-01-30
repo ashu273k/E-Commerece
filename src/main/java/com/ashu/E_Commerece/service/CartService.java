@@ -21,7 +21,8 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
- * Service for shopping cart operations.
+ * Manages shopping cart state with optimistic stock validation.
+ * Cart operations are user-scoped and lazily initialized.
  */
 @Service
 @RequiredArgsConstructor
@@ -33,9 +34,6 @@ public class CartService {
     private final ProductRepository productRepository;
     private final UserService userService;
 
-    /**
-     * Get current user's cart.
-     */
     @Transactional(readOnly = true)
     public CartResponse getCart() {
         User user = userService.getCurrentUser();
@@ -44,7 +42,8 @@ public class CartService {
     }
 
     /**
-     * Add item to cart.
+     * Adds product to cart with stock validation. If product already exists,
+     * quantities are merged rather than creating duplicate entries.
      */
     @Transactional
     public CartResponse addItem(CartItemRequest request) {
@@ -66,7 +65,7 @@ public class CartService {
             throw new BadRequestException("Requested quantity exceeds available stock");
         }
 
-        // Check if item already exists in cart
+        // Merge with existing cart item to maintain single entry per product
         Optional<CartItem> existingItem = cartItemRepository.findByCartIdAndProductId(cart.getId(), product.getId());
 
         if (existingItem.isPresent()) {
@@ -93,7 +92,8 @@ public class CartService {
     }
 
     /**
-     * Update cart item quantity.
+     * Updates quantity or removes item if quantity <= 0.
+     * Validates against current stock to prevent checkout failures.
      */
     @Transactional
     public CartResponse updateItemQuantity(Long itemId, int quantity) {
@@ -122,9 +122,6 @@ public class CartService {
         return mapToResponse(cart);
     }
 
-    /**
-     * Remove item from cart.
-     */
     @Transactional
     public CartResponse removeItem(Long itemId) {
         User user = userService.getCurrentUser();
@@ -143,23 +140,18 @@ public class CartService {
         return mapToResponse(cart);
     }
 
-    /**
-     * Clear all items from cart.
-     */
     @Transactional
     public void clearCart() {
         User user = userService.getCurrentUser();
         Cart cart = getOrCreateCart(user);
-        
+
         cart.clear();
         cartRepository.save(cart);
-        
+
         log.info("Cart cleared for user: {}", user.getEmail());
     }
 
-    /**
-     * Get or create cart for user.
-     */
+    // Lazy cart initialization - creates cart on first access
     @Transactional
     public Cart getOrCreateCart(User user) {
         return cartRepository.findByUserIdWithItems(user.getId())
